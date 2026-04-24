@@ -1934,6 +1934,70 @@ class DevtoolBuildImageTests(DevtoolBase):
         if reqpkgs:
             self.fail('The following packages were not present in the image as expected: %s' % ', '.join(reqpkgs))
 
+
+class DevtoolTestImageTests(DevtoolBase):
+
+    @OETestTag("runqemu")
+    def test_devtool_test_image_ptest(self):
+        """Test devtool test-image plugin."""
+
+        machine = get_bb_var('MACHINE')
+        if not machine or not machine.startswith('qemu'):
+            self.skipTest('This test only works with qemu machines')
+
+        self.assertTrue(not os.path.exists(self.workspacedir),
+                        'This test cannot be run with a workspace directory under the build directory')
+
+        self.append_config('DISTRO_FEATURES:append = " ptest"')
+        self.append_config('IMAGE_CLASSES += " testimage"')
+        self.append_config('TEST_RUNQEMUPARAMS:append = " slirp"')
+
+        recipe = 'python3-atomicwrites'
+        image = 'core-image-ptest-%s' % recipe
+
+        # Ensure selected test package is ptest-capable.
+        ptest_path = get_bb_var('PTEST_PATH', recipe)
+        self.assertTrue(ptest_path,
+                'Selected package %s does not appear to inherit ptest' % recipe)
+
+        self.track_for_cleanup(self.workspacedir)
+        self.add_command_to_tearDown('bitbake-layers remove-layer */workspace')
+
+        # Ensure we're starting from a clean state
+        bitbake('%s -c clean' % image)
+
+        result = runCmd('devtool test-image %s -p %s --test-suites "ping ssh ptest"' % (image, recipe), ignore_status=True)
+        if result.status != 0 and 'runqemu - ERROR - Unknown path arg' in result.output:
+            self.skipTest('runqemu in this environment does not accept testimage rootfs path args')
+        self.assertEqual(result.status, 0,
+                         'devtool test-image failed unexpectedly:\n%s' % result.output)
+
+        # Check that requested package and its ptest package were installed
+        deploy_dir_image = get_bb_var('DEPLOY_DIR_IMAGE')
+        self.assertTrue(deploy_dir_image, 'Unable to get DEPLOY_DIR_IMAGE')
+
+        manifests = sorted(glob.glob(os.path.join(deploy_dir_image, '%s*.manifest' % image)))
+        self.assertTrue(manifests, 'Image manifest not found for %s in %s' % (image, deploy_dir_image))
+        manifest = manifests[-1]
+        self.assertExists(manifest, 'Image manifest not found: %s' % manifest)
+
+        pkgs = set()
+        with open(manifest, 'r') as f:
+            for line in f:
+                splitval = line.split()
+                if splitval:
+                    pkgs.add(splitval[0])
+
+        self.assertIn(recipe, pkgs)
+        self.assertIn(recipe + '-ptest', pkgs)
+
+        match = re.search(r'Logs are in (\S+)', result.output)
+        if match:
+            logdir = match.group(1)
+        else:
+            logdir = os.path.join(self.workspacedir, 'testimage-logs')
+        self.assertTrue(os.path.isdir(logdir), 'Expected logs directory not found: %s' % logdir)
+
 class DevtoolUpgradeTests(DevtoolBase):
 
     def setUp(self):
